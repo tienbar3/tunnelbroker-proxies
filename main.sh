@@ -9,13 +9,15 @@ else
 fi
 
 ####
-echo "↓ Routed /48 or /64 IPv6 prefix from tunnelbroker (*:*:*::/*):"
+echo "↓ Routed IPv6 prefix (example: xxxx:xxxx::/48 | /64 | /80):"
 read PROXY_NETWORK
 
 if [[ $PROXY_NETWORK == *"::/48"* ]]; then
   PROXY_NET_MASK=48
 elif [[ $PROXY_NETWORK == *"::/64"* ]]; then
   PROXY_NET_MASK=64
+elif [[ $PROXY_NETWORK == *"::/80"* ]]; then
+  PROXY_NET_MASK=80
 else
   echo "● Unsupported IPv6 prefix format: $PROXY_NETWORK"
   exit 1
@@ -25,7 +27,7 @@ fi
 echo "↓ Server IPv4 address from tunnelbroker:"
 read TUNNEL_IPV4_ADDR
 if [[ ! "$TUNNEL_IPV4_ADDR" ]]; then
-  echo "● IPv4 address can't be emty"
+  echo "● IPv4 address can't be empty"
   exit 1
 fi
 
@@ -36,8 +38,8 @@ read PROXY_LOGIN
 if [[ "$PROXY_LOGIN" ]]; then
   echo "↓ Proxies password:"
   read PROXY_PASS
-  if [[ ! "PROXY_PASS" ]]; then
-    echo "● Proxies pass can't be emty"
+  if [[ ! "$PROXY_PASS" ]]; then
+    echo "● Proxies pass can't be empty"
     exit 1
   fi
 fi
@@ -59,7 +61,7 @@ fi
 ####
 echo "↓ Proxies protocol (http, socks5; default http):"
 read PROXY_PROTOCOL
-if [[ PROXY_PROTOCOL != "socks5" ]]; then
+if [[ "$PROXY_PROTOCOL" != "socks5" ]]; then
   PROXY_PROTOCOL="http"
 fi
 
@@ -67,64 +69,43 @@ fi
 clear
 sleep 1
 PROXY_NETWORK=$(echo $PROXY_NETWORK | awk -F:: '{print $1}')
+HOST_IPV4_ADDR=$(hostname -I | awk '{print $1}')
+
 echo "● Network: $PROXY_NETWORK"
 echo "● Network Mask: $PROXY_NET_MASK"
-HOST_IPV4_ADDR=$(hostname -I | awk '{print $1}')
 echo "● Host IPv4 address: $HOST_IPV4_ADDR"
 echo "● Tunnel IPv4 address: $TUNNEL_IPV4_ADDR"
 echo "● Proxies count: $PROXY_COUNT, starting from port: $PROXY_START_PORT"
 echo "● Proxies protocol: $PROXY_PROTOCOL"
+
 if [[ "$PROXY_LOGIN" ]]; then
   echo "● Proxies login: $PROXY_LOGIN"
   echo "● Proxies password: $PROXY_PASS"
 fi
 
-####
 echo "-------------------------------------------------"
-echo ">-- Updating packages and installing dependencies"
-apt-get update >/dev/null 2>&1
-apt-get -y install gcc g++ make bc pwgen git >/dev/null 2>&1
+echo ">-- Installing dependencies"
+apt-get update -y >/dev/null 2>&1
+apt-get install -y gcc g++ make bc pwgen git wget >/dev/null 2>&1
 
 ####
-echo ">-- Setting up sysctl.conf"
+echo ">-- System tuning"
 cat >>/etc/sysctl.conf <<END
-net.ipv6.conf.eth0.proxy_ndp=1
 net.ipv6.conf.all.proxy_ndp=1
 net.ipv6.conf.default.forwarding=1
 net.ipv6.conf.all.forwarding=1
 net.ipv6.ip_nonlocal_bind=1
-net.ipv4.ip_local_port_range=1024 64000
-net.ipv6.route.max_size=409600
-net.ipv4.tcp_max_syn_backlog=4096
-net.ipv6.neigh.default.gc_thresh3=102400
-kernel.threads-max=1200000
-kernel.max_map_count=6000000
-vm.max_map_count=6000000
-kernel.pid_max=2000000
 END
+sysctl -p >/dev/null 2>&1
 
 ####
-echo ">-- Setting up logind.conf"
-echo "UserTasksMax=1000000" >>/etc/systemd/logind.conf
-
-####
-echo ">-- Setting up system.conf"
-cat >>/etc/systemd/system.conf <<END
-UserTasksMax=1000000
-DefaultMemoryAccounting=no
-DefaultTasksAccounting=no
-DefaultTasksMax=1000000
-UserTasksMax=1000000
-END
-
-####
-echo ">-- Setting up ndppd"
+echo ">-- Installing ndppd"
 cd ~
-git clone --quiet https://github.com/DanielAdolfsson/ndppd.git >/dev/null
-cd ~/ndppd
-make -k all >/dev/null 2>&1
-make -k install >/dev/null 2>&1
-cat >~/ndppd/ndppd.conf <<END
+git clone https://github.com/DanielAdolfsson/ndppd.git >/dev/null 2>&1
+cd ndppd
+make >/dev/null 2>&1 && make install >/dev/null 2>&1
+
+cat >~/ndppd.conf <<END
 route-ttl 30000
 proxy he-ipv6 {
    router no
@@ -137,101 +118,98 @@ proxy he-ipv6 {
 END
 
 ####
-echo ">-- Setting up 3proxy"
+echo ">-- Installing 3proxy"
 cd ~
 wget -q https://github.com/z3APA3A/3proxy/archive/0.8.13.tar.gz
 tar xzf 0.8.13.tar.gz
-mv ~/3proxy-0.8.13 ~/3proxy
-rm 0.8.13.tar.gz
-cd ~/3proxy
-chmod +x src/
-touch src/define.txt
-echo "#define ANONYMOUS 1" >src/define.txt
-sed -i '31r src/define.txt' src/proxy.h
+mv 3proxy-0.8.13 3proxy
+cd 3proxy
 make -f Makefile.Linux >/dev/null 2>&1
-cat >~/3proxy/3proxy.cfg <<END
-#!/bin/bash
 
+cat >~/3proxy/3proxy.cfg <<END
 daemon
-maxconn 100
+maxconn 1000
 nserver 1.1.1.1
 nscache 65536
 timeouts 1 5 30 60 180 1800 15 60
 setgid 65535
 setuid 65535
-stacksize 6000
 flush
 END
 
 if [[ "$PROXY_LOGIN" ]]; then
-  cat >>~/3proxy/3proxy.cfg <<END
+cat >>~/3proxy/3proxy.cfg <<END
 auth strong
 users ${PROXY_LOGIN}:CL:${PROXY_PASS}
 allow ${PROXY_LOGIN}
 END
 else
-  cat >>~/3proxy/3proxy.cfg <<END
-auth none
-END
+echo "auth none" >>~/3proxy/3proxy.cfg
 fi
 
 ####
-echo ">-- Generating IPv6 addresses"
-touch ~/ip.list
-touch ~/tunnels.txt
+echo ">-- Generating IPv6 list"
+> ~/ip.list
+> ~/proxy.txt
 
-P_VALUES=(1 2 3 4 5 6 7 8 9 0 a b c d e f)
-PROXY_GENERATING_INDEX=1
-GENERATED_PROXY=""
+HEX=(0 1 2 3 4 5 6 7 8 9 a b c d e f)
 
-generate_proxy() {
-  a=${P_VALUES[$RANDOM % 16]}${P_VALUES[$RANDOM % 16]}${P_VALUES[$RANDOM % 16]}${P_VALUES[$RANDOM % 16]}
-  b=${P_VALUES[$RANDOM % 16]}${P_VALUES[$RANDOM % 16]}${P_VALUES[$RANDOM % 16]}${P_VALUES[$RANDOM % 16]}
-  c=${P_VALUES[$RANDOM % 16]}${P_VALUES[$RANDOM % 16]}${P_VALUES[$RANDOM % 16]}${P_VALUES[$RANDOM % 16]}
-  d=${P_VALUES[$RANDOM % 16]}${P_VALUES[$RANDOM % 16]}${P_VALUES[$RANDOM % 16]}${P_VALUES[$RANDOM % 16]}
-  e=${P_VALUES[$RANDOM % 16]}${P_VALUES[$RANDOM % 16]}${P_VALUES[$RANDOM % 16]}${P_VALUES[$RANDOM % 16]}
-
-  echo "$PROXY_NETWORK:$a:$b:$c:$d$([ $PROXY_NET_MASK == 48 ] && echo ":$e" || echo "")" >>~/ip.list
-
+gen_ip() {
+  for i in {1..8}; do
+    printf "%x" $((RANDOM%16))
+  done
 }
 
-while [ "$PROXY_GENERATING_INDEX" -le $PROXY_COUNT ]; do
-  generate_proxy
-  let "PROXY_GENERATING_INDEX+=1"
-done
+for ((i=0;i<$PROXY_COUNT;i++)); do
 
-CURRENT_PROXY_PORT=${PROXY_START_PORT}
-for e in $(cat ~/ip.list); do
-  echo "$([ $PROXY_PROTOCOL == "socks5" ] && echo "socks" || echo "proxy") -6 -s0 -n -a -p$CURRENT_PROXY_PORT -i$HOST_IPV4_ADDR -e$e" >>~/3proxy/3proxy.cfg
-  echo "$PROXY_PROTOCOL://$([ "$PROXY_LOGIN" ] && echo "$PROXY_LOGIN:$PROXY_PASS@" || echo "")$HOST_IPV4_ADDR:$CURRENT_PROXY_PORT" >>~/tunnels.txt
-  let "CURRENT_PROXY_PORT+=1"
+  if [[ $PROXY_NET_MASK == 48 ]]; then
+    IP="$PROXY_NETWORK:$(gen_ip):$(gen_ip):$(gen_ip):$(gen_ip)"
+  elif [[ $PROXY_NET_MASK == 64 ]]; then
+    IP="$PROXY_NETWORK:$(gen_ip):$(gen_ip):$(gen_ip)"
+  elif [[ $PROXY_NET_MASK == 80 ]]; then
+    IP="$PROXY_NETWORK:$(gen_ip):$(gen_ip)"
+  fi
+
+  echo $IP >> ~/ip.list
 done
 
 ####
-echo ">-- Setting up rc.local"
+echo ">-- Creating proxy config"
+
+PORT=$PROXY_START_PORT
+
+while read ip; do
+  echo "$([ $PROXY_PROTOCOL == "socks5" ] && echo "socks" || echo "proxy") -6 -n -a -p$PORT -i$HOST_IPV4_ADDR -e$ip" >>~/3proxy/3proxy.cfg
+
+  if [[ "$PROXY_LOGIN" ]]; then
+    echo "$PROXY_PROTOCOL://$PROXY_LOGIN:$PROXY_PASS@$HOST_IPV4_ADDR:$PORT" >> ~/proxy.txt
+  else
+    echo "$PROXY_PROTOCOL://$HOST_IPV4_ADDR:$PORT" >> ~/proxy.txt
+  fi
+
+  ((PORT++))
+done < ~/ip.list
+
+####
+echo ">-- Creating startup script"
+
 cat >/etc/rc.local <<END
 #!/bin/bash
+ip tunnel add he-ipv6 mode sit remote $TUNNEL_IPV4_ADDR local $HOST_IPV4_ADDR ttl 255
+ip link set he-ipv6 up
+ip addr add ${PROXY_NETWORK}::1/${PROXY_NET_MASK} dev he-ipv6
+ip -6 route add default dev he-ipv6
 
-ulimit -n 600000
-ulimit -u 600000
-ulimit -i 1200000
-ulimit -s 1000000
-ulimit -l 200000
-/sbin/ip addr add ${PROXY_NETWORK}::/${PROXY_NET_MASK} dev he-ipv6
-sleep 5
-/sbin/ip -6 route add default via ${PROXY_NETWORK}::1
-/sbin/ip -6 route add local ${PROXY_NETWORK}::/${PROXY_NET_MASK} dev lo
-/sbin/ip tunnel add he-ipv6 mode sit remote ${TUNNEL_IPV4_ADDR} local ${HOST_IPV4_ADDR} ttl 255
-/sbin/ip link set he-ipv6 up
-/sbin/ip -6 route add 2000::/3 dev he-ipv6
-~/ndppd/ndppd -d -c ~/ndppd/ndppd.conf
-sleep 2
+~/ndppd/ndppd -d -c ~/ndppd.conf
 ~/3proxy/src/3proxy ~/3proxy/3proxy.cfg
 exit 0
-
 END
-/bin/chmod +x /etc/rc.local
+
+chmod +x /etc/rc.local
 
 ####
-echo "Finishing and rebooting"
-reboot now
+echo "DONE!"
+echo "Proxy list saved in ~/proxy.txt"
+echo "Rebooting..."
+
+reboot
